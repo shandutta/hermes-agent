@@ -1856,9 +1856,34 @@ class GatewayRunner:
 
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
 
-    def _voice_key(self, platform: Platform, chat_id: str) -> str:
-        """Return a platform-namespaced key for voice mode state."""
-        return f"{platform.value}:{chat_id}"
+    def _voice_scope(self, chat_id: str, thread_id: Optional[str] = None) -> str:
+        """Return the adapter-local voice scope for a chat or chat thread."""
+        base = str(chat_id)
+        if thread_id is not None and str(thread_id).strip():
+            return f"{base}:{thread_id}"
+        return base
+
+    def _voice_key(
+        self,
+        platform: Platform,
+        chat_id: str,
+        thread_id: Optional[str] = None,
+    ) -> str:
+        """Return a platform-namespaced key for voice mode state.
+
+        Threaded platforms (Telegram topics, Discord threads, etc.) use a
+        narrower ``platform:chat_id:thread_id`` key so /voice settings in one
+        topic do not leak into sibling topics.  Non-threaded chats keep the
+        legacy ``platform:chat_id`` shape.
+        """
+        return f"{platform.value}:{self._voice_scope(chat_id, thread_id)}"
+
+    def _voice_mode_for_source(self, source) -> str:
+        """Return voice mode for a source, falling back to legacy chat-level state."""
+        thread_key = self._voice_key(source.platform, source.chat_id, source.thread_id)
+        if thread_key in self._voice_mode:
+            return self._voice_mode[thread_key]
+        return self._voice_mode.get(self._voice_key(source.platform, source.chat_id), "off")
 
     def _load_voice_modes(self) -> Dict[str, str]:
         try:
@@ -1895,22 +1920,35 @@ class GatewayRunner:
         except OSError as e:
             logger.warning("Failed to save voice modes: %s", e)
 
-    def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
+    def _set_adapter_auto_tts_disabled(
+        self,
+        adapter,
+        chat_id: str,
+        disabled: bool,
+        thread_id: Optional[str] = None,
+    ) -> None:
         """Update an adapter's in-memory auto-TTS suppression set if present."""
         disabled_chats = getattr(adapter, "_auto_tts_disabled_chats", None)
         if not isinstance(disabled_chats, set):
             return
+        scope = self._voice_scope(chat_id, thread_id)
         if disabled:
-            disabled_chats.add(chat_id)
+            disabled_chats.add(scope)
             # ``/voice off`` also clears any explicit enable — it's a hard override.
             enabled_chats = getattr(adapter, "_auto_tts_enabled_chats", None)
             if isinstance(enabled_chats, set):
-                enabled_chats.discard(chat_id)
+                enabled_chats.discard(scope)
         else:
-            disabled_chats.discard(chat_id)
+            disabled_chats.discard(scope)
 
-    def _set_adapter_auto_tts_enabled(self, adapter, chat_id: str, enabled: bool) -> None:
-        """Update an adapter's per-chat auto-TTS opt-in set if present.
+    def _set_adapter_auto_tts_enabled(
+        self,
+        adapter,
+        chat_id: str,
+        enabled: bool,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        """Update an adapter's per-chat/thread auto-TTS opt-in set if present.
 
         Used for ``/voice on``/``/voice tts`` where the user explicitly wants
         auto-TTS even when ``voice.auto_tts`` is False globally.
@@ -1918,14 +1956,15 @@ class GatewayRunner:
         enabled_chats = getattr(adapter, "_auto_tts_enabled_chats", None)
         if not isinstance(enabled_chats, set):
             return
+        scope = self._voice_scope(chat_id, thread_id)
         if enabled:
-            enabled_chats.add(chat_id)
-            # An explicit opt-in clears any stale /voice off for this chat.
+            enabled_chats.add(scope)
+            # An explicit opt-in clears any stale /voice off for this scope.
             disabled_chats = getattr(adapter, "_auto_tts_disabled_chats", None)
             if isinstance(disabled_chats, set):
-                disabled_chats.discard(chat_id)
+                disabled_chats.discard(scope)
         else:
-            enabled_chats.discard(chat_id)
+            enabled_chats.discard(scope)
 
     def _sync_voice_mode_state_to_adapter(self, adapter) -> None:
         """Restore persisted /voice state into a live platform adapter.
@@ -10858,7 +10897,8 @@ class GatewayRunner:
         args = event.get_command_args().strip().lower()
         chat_id = event.source.chat_id
         platform = event.source.platform
-        voice_key = self._voice_key(platform, chat_id)
+        thread_id = event.source.thread_id
+        voice_key = self._voice_key(platform, chat_id, thread_id)
 
         adapter = self.adapters.get(platform)
 
@@ -10866,26 +10906,26 @@ class GatewayRunner:
             self._voice_mode[voice_key] = "voice_only"
             self._save_voice_modes()
             if adapter:
-                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True, thread_id=thread_id)
             return t("gateway.voice.enabled_voice_only")
         elif args in {"off", "disable"}:
             self._voice_mode[voice_key] = "off"
             self._save_voice_modes()
             if adapter:
-                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True, thread_id=thread_id)
             return t("gateway.voice.disabled_text")
         elif args == "tts":
             self._voice_mode[voice_key] = "all"
             self._save_voice_modes()
             if adapter:
-                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True, thread_id=thread_id)
             return t("gateway.voice.tts_enabled")
         elif args in {"channel", "join"}:
             return await self._handle_voice_channel_join(event)
         elif args == "leave":
             return await self._handle_voice_channel_leave(event)
         elif args == "status":
-            mode = self._voice_mode.get(voice_key, "off")
+            mode = self._voice_mode_for_source(event.source)
             labels = {
                 "off": t("gateway.voice.label_off"),
                 "voice_only": t("gateway.voice.label_voice_only"),
@@ -10909,18 +10949,18 @@ class GatewayRunner:
             return t("gateway.voice.status_mode", label=labels.get(mode, mode))
         else:
             # Toggle: off → on, on/all → off
-            current = self._voice_mode.get(voice_key, "off")
+            current = self._voice_mode_for_source(event.source)
             if current == "off":
                 self._voice_mode[voice_key] = "voice_only"
                 self._save_voice_modes()
                 if adapter:
-                    self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+                    self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True, thread_id=thread_id)
                 return t("gateway.voice.enabled_short")
             else:
                 self._voice_mode[voice_key] = "off"
                 self._save_voice_modes()
                 if adapter:
-                    self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+                    self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True, thread_id=thread_id)
                 return t("gateway.voice.disabled_short")
 
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
@@ -10963,9 +11003,9 @@ class GatewayRunner:
             adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
             if hasattr(adapter, "_voice_sources"):
                 adapter._voice_sources[guild_id] = event.source.to_dict()
-            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "all"
+            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id, event.source.thread_id)] = "all"
             self._save_voice_modes()
-            self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
+            self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True, thread_id=event.source.thread_id)
             return (
                 f"Joined voice channel **{voice_channel.name}**.\n"
                 f"I'll speak my replies and listen to you. Use /voice leave to disconnect."
@@ -10990,9 +11030,9 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("Error leaving voice channel: %s", e)
         # Always clean up state even if leave raised an exception
-        self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "off"
+        self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id, event.source.thread_id)] = "off"
         self._save_voice_modes()
-        self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
+        self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True, thread_id=event.source.thread_id)
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = None
         return "Left voice channel."
@@ -11138,7 +11178,7 @@ class GatewayRunner:
             return False
 
         chat_id = event.source.chat_id
-        voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
+        voice_mode = self._voice_mode_for_source(event.source)
         is_voice_input = (event.message_type == MessageType.VOICE)
 
         should = (

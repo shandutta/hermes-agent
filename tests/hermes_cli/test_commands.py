@@ -972,6 +972,7 @@ class TestTelegramMenuCommands:
             "new",
             "stop",
             "status",
+            "voice",
         ):
             assert name in names
 

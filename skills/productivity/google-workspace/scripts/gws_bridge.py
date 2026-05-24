@@ -16,6 +16,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from _hermes_home import get_hermes_home
+from google_oauth_store import ensure_materialized, save_json_and_write_back
 
 
 def get_token_path() -> Path:
@@ -51,15 +52,12 @@ def refresh_token(token_data: dict) -> dict:
 
     req = urllib.request.Request(token_data["token_uri"], data=params)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"ERROR: Token refresh failed (HTTP {e.code}): {body}", file=sys.stderr)
         print("Re-run setup.py to re-authenticate.", file=sys.stderr)
-        sys.exit(1)
-    except (urllib.error.URLError, TimeoutError) as e:
-        print(f"ERROR: Token refresh failed (network): {e}", file=sys.stderr)
         sys.exit(1)
 
     token_data["token"] = result["access_token"]
@@ -68,15 +66,14 @@ def refresh_token(token_data: dict) -> dict:
         tz=timezone.utc,
     ).isoformat()
 
-    get_token_path().write_text(
-        json.dumps(_normalize_authorized_user_payload(token_data), indent=2)
-    )
+    save_json_and_write_back(get_token_path(), _normalize_authorized_user_payload(token_data))
     return token_data
 
 
 def get_valid_token() -> str:
     """Return a valid access token, refreshing if needed."""
     token_path = get_token_path()
+    ensure_materialized(token_path)
     if not token_path.exists():
         print("ERROR: No Google token found. Run setup.py --auth-url first.", file=sys.stderr)
         sys.exit(1)

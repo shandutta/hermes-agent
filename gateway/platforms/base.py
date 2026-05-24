@@ -1530,19 +1530,43 @@ class BasePlatformAdapter(ABC):
     def fatal_error_retryable(self) -> bool:
         return self._fatal_error_retryable
 
-    def _should_auto_tts_for_chat(self, chat_id: str) -> bool:
+    def _auto_tts_scope_for_event(self, event) -> str:
+        """Return the voice-mode scope for an inbound event.
+
+        Threaded chats use ``chat_id:thread_id`` so /voice settings are scoped
+        to the active topic/thread.  Legacy chat-only keys remain supported by
+        _should_auto_tts_for_chat() as a fallback.
+        """
+        chat_id = str(event.source.chat_id)
+        thread_id = getattr(event.source, "thread_id", None)
+        if thread_id is not None and str(thread_id).strip():
+            return f"{chat_id}:{thread_id}"
+        return chat_id
+
+    def _should_auto_tts_for_chat(
+        self,
+        chat_id: str,
+        legacy_chat_id: Optional[str] = None,
+    ) -> bool:
         """Whether auto-TTS on voice input should fire for ``chat_id``.
 
         Decision layers (Issue #16007):
-          1. Explicit ``/voice on`` or ``/voice tts`` → always fire (even if
-             ``voice.auto_tts`` is False).
-          2. Explicit ``/voice off`` → never fire.
-          3. Fall back to the global ``voice.auto_tts`` config default.
+          1. Explicit ``/voice on`` or ``/voice tts`` for this chat/thread → always fire
+             (even if ``voice.auto_tts`` is False).
+          2. Explicit ``/voice off`` for this chat/thread → never fire.
+          3. Legacy chat-level ``/voice`` entries still act as fallback for
+             existing persisted state.
+          4. Fall back to the global ``voice.auto_tts`` config default.
         """
         if chat_id in self._auto_tts_enabled_chats:
             return True
         if chat_id in self._auto_tts_disabled_chats:
             return False
+        if legacy_chat_id and legacy_chat_id != chat_id:
+            if legacy_chat_id in self._auto_tts_enabled_chats:
+                return True
+            if legacy_chat_id in self._auto_tts_disabled_chats:
+                return False
         return bool(self._auto_tts_default)
 
     def set_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
@@ -3489,7 +3513,10 @@ class BasePlatformAdapter(ABC):
                 # an explicit ``/voice on|tts`` opt-in OR when ``voice.auto_tts`` is
                 # True globally and no ``/voice off`` has been issued.
                 _tts_path = None
-                if (self._should_auto_tts_for_chat(event.source.chat_id)
+                if (self._should_auto_tts_for_chat(
+                            self._auto_tts_scope_for_event(event),
+                            legacy_chat_id=event.source.chat_id,
+                        )
                         and event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files):

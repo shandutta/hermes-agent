@@ -358,7 +358,7 @@ TOOLSETS = {
     },
 
     "hermes-api-server": {
-        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
+        "description": "OpenAI-compatible API server — full agent tools accessible via authenticated HTTP, except interactive clarify prompts",
         "tools": [
             # Web
             "web_search", "web_extract",
@@ -375,6 +375,8 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
+            # Text-to-speech
+            "text_to_speech",
             # Planning & memory
             "todo", "memory",
             # Session history search
@@ -383,6 +385,8 @@ TOOLSETS = {
             "execute_code", "delegate_task",
             # Cronjob management
             "cronjob",
+            # Cross-platform messaging (gated on gateway running via check_fn)
+            "send_message",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 

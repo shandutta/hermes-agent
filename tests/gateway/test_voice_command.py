@@ -58,14 +58,14 @@ from gateway.platforms.base import MessageEvent, MessageType, SessionSource
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_event(text: str = "", message_type=MessageType.TEXT, chat_id="123") -> MessageEvent:
+def _make_event(text: str = "", message_type=MessageType.TEXT, chat_id="123", thread_id=None) -> MessageEvent:
     source = SessionSource(
         chat_id=chat_id,
         user_id="user1",
         platform=MagicMock(),
+        thread_id=str(thread_id) if thread_id is not None else None,
     )
     source.platform.value = "telegram"
-    source.thread_id = None
     event = MessageEvent(text=text, message_type=message_type, source=source)
     event.message_id = "msg42"
     return event
@@ -248,6 +248,39 @@ class TestHandleVoiceCommand:
         await runner._handle_voice_command(e2)
         assert runner._voice_mode["telegram:aaa"] == "voice_only"
         assert runner._voice_mode["telegram:bbb"] == "all"
+
+    @pytest.mark.asyncio
+    async def test_per_thread_isolation_with_legacy_fallback(self, runner):
+        runner._voice_mode["telegram:group"] = "all"
+
+        e1 = _make_event("/voice off", chat_id="group", thread_id="10")
+        e2 = _make_event("/voice status", chat_id="group", thread_id="20")
+        await runner._handle_voice_command(e1)
+        status = await runner._handle_voice_command(e2)
+
+        assert runner._voice_mode["telegram:group:10"] == "off"
+        assert runner._voice_mode["telegram:group"] == "all"
+        assert "tts" in status.lower()
+
+    @pytest.mark.asyncio
+    async def test_thread_scope_updates_adapter_sets(self, runner):
+        from gateway.config import Platform
+
+        adapter = SimpleNamespace(
+            _auto_tts_default=False,
+            _auto_tts_disabled_chats=set(),
+            _auto_tts_enabled_chats=set(),
+            platform=Platform.TELEGRAM,
+        )
+        runner.adapters = {Platform.TELEGRAM: adapter}
+        event = _make_event("/voice on", chat_id="group", thread_id="42")
+        event.source.platform = Platform.TELEGRAM
+
+        await runner._handle_voice_command(event)
+
+        assert runner._voice_mode["telegram:group:42"] == "voice_only"
+        assert adapter._auto_tts_enabled_chats == {"group:42"}
+        assert adapter._auto_tts_disabled_chats == set()
 
     @pytest.mark.asyncio
     async def test_platform_isolation(self, runner):
